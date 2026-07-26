@@ -287,9 +287,9 @@ ENV_CONTENT="$(
     printf 'VPS_HOST=%s\n'     "$VPS_HOST"
     printf 'VPS_PORT=%s\n'     "$VPS_PORT"
     printf 'VPS_USERNAME=%s\n' "$VPS_USER"
-    printf 'VPS_SSH_KEY="'
+    printf 'VPS_SSH_KEY='
     cat "$KEY_PATH"
-    printf '"'
+    printf ''
 )"
 
 # --- 9. output -----------------------------------------------------------------
