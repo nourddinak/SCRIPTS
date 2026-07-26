@@ -3,16 +3,20 @@
 #  setup-github.sh — GitHub Actions -> VPS deploy bootstrapper
 #
 #  QUICK RUN (recommended, keeps stdin usable):
-#      bash <(curl -fsSL https://your.domain/setup-github.sh)
+#      bash <(curl -fsSL https://github.com/nourddinak/SCRIPTS/setup-github.sh)
 #
 #  PIPE STYLE (works too, args go after -s --):
 #      curl -fsSL https://github.com/nourddinak/SCRIPTS/setup-github.sh | bash -s -- --port 2222
 #
 #  CLASSIC:
-#      curl -fsSL -o setup-github.sh https://github.com/nourddinak/SCRIPTS/setup-github.sh
+#      curl -fsSL -o setup-github.sh https://your.domain/setup-github.sh
 #      chmod +x setup-github.sh && ./setup-github.sh
 #
 #  Flags:
+#      -e, --env             write a ready-to-paste .env file (mode 600)
+#          --env-file PATH   where to write it (default: ~/github-deploy.env)
+#      -r, --repo OWNER/NAME target repository, enables the gh commands
+#          --push            upload deploy key + all secrets with the gh CLI
 #      -n, --key-name NAME   key file name inside ~/.ssh   (default: deploy_key)
 #      -H, --host IP         override the detected host/IP
 #      -p, --port PORT       override the detected SSH port
@@ -31,6 +35,10 @@ KEY_NAME="deploy_key"
 FORCE=0
 PRINT_PRIVATE=1
 SAVE_SUMMARY=0
+WRITE_ENV=0
+ENV_FILE=""
+REPO=""
+PUSH=0
 QUIET=0
 OVERRIDE_HOST=""
 OVERRIDE_PORT=""
@@ -66,14 +74,26 @@ while [ $# -gt 0 ]; do
         -u|--user)      OVERRIDE_USER="${2:?missing value}"; shift 2 ;;
         -f|--force)     FORCE=1; shift ;;
         --no-private)   PRINT_PRIVATE=0; shift ;;
+        -e|--env)       WRITE_ENV=1; shift ;;
+        --env-file)     WRITE_ENV=1; ENV_FILE="${2:?missing value}"; shift 2 ;;
+        -r|--repo)      REPO="${2:?missing value}"; shift 2 ;;
+        --push)         PUSH=1; WRITE_ENV=1; shift ;;
         --save)         SAVE_SUMMARY=1; shift ;;
         -q|--quiet)     QUIET=1; shift ;;
-        -h|--help)      sed -n '2,25p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)      sed -n '2,29p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)              die "unknown option: $1  (try --help)" ;;
     esac
 done
 
 KEY_PATH="$SSH_DIR/$KEY_NAME"
+ENV_FILE="${ENV_FILE:-$HOME/github-deploy.env}"
+
+if [ "$PUSH" -eq 1 ] && [ -z "$REPO" ]; then
+    die "--push needs --repo OWNER/NAME"
+fi
+if [ -n "$REPO" ] && [[ ! "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    die "--repo must look like OWNER/NAME (got: $REPO)"
+fi
 
 # If we were piped into bash, stdin is the script itself. Reattach a real
 # terminal so nothing downstream can swallow the rest of the script.
@@ -259,28 +279,93 @@ fi
 VPS_PORT="${OVERRIDE_PORT:-$(detect_port)}"
 VPS_USER="${OVERRIDE_USER:-$(id -un)}"
 
-# --- 8. output ----------------------------------------------------------------
-head2 "1. Deploy Key  →  Repo · Settings · Deploy keys · Add deploy key"
+# --- 8. build the .env payload -------------------------------------------------
+# command substitution strips trailing newlines, so the closing quote is
+# printed on its own line to preserve the newline OpenSSH keys require.
+ENV_CONTENT="$(
+    printf '# GitHub Actions -> VPS  ·  generated %s\n' "$(date -Is)"
+    printf 'VPS_HOST=%s\n'     "$VPS_HOST"
+    printf 'VPS_PORT=%s\n'     "$VPS_PORT"
+    printf 'VPS_USERNAME=%s\n' "$VPS_USER"
+    printf 'VPS_SSH_KEY="'
+    cat "$KEY_PATH"
+    printf '"'
+)"
+
+# --- 9. output -----------------------------------------------------------------
+head2 "1. Deploy key  →  Repo · Settings · Deploy keys · Add deploy key"
 cat "$KEY_PATH.pub"
 say "${D}(tick \"Allow write access\" only if the workflow pushes back)${N}"
 
-head2 "2. Repository Secrets  →  Repo · Settings · Secrets and variables · Actions"
+head2 "2. Detected values"
 printf '  %-14s %s   %s(%s)%s\n' "VPS_HOST"     "$VPS_HOST" "$D" "$IP_SRC" "$N"
-printf '  %-14s %s\n'            "VPS_PORT"     "$VPS_PORT"
+printf '  %-14s %s   %s(%s)%s\n' "VPS_PORT"     "$VPS_PORT" "$D" "sshd_config" "$N"
 printf '  %-14s %s\n'            "VPS_USERNAME" "$VPS_USER"
-printf '  %-14s %s\n'            "VPS_SSH_KEY"  "the private key below (full text, incl. BEGIN/END lines)"
+printf '  %-14s %s\n'            "VPS_SSH_KEY"  "$KEY_PATH"
 
-head2 "3. VPS_SSH_KEY value"
+head2 "3. Ready-to-paste .env"
 if [ "$PRINT_PRIVATE" -eq 1 ]; then
-    warn "secret below — don't run this on a shared screen or logged session"
+    warn "contains a private key — not for a shared screen or a recorded session"
     say ""
-    cat "$KEY_PATH"
+    printf '%s\n' "$ENV_CONTENT"
 else
-    say "  hidden. read it with:  cat $KEY_PATH"
+    say "  hidden by --no-private"
+fi
+
+if [ "$WRITE_ENV" -eq 1 ]; then
+    umask 077
+    printf '%s\n' "$ENV_CONTENT" >"$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    say ""
+    say "  ${G}saved${N} -> $ENV_FILE   ${D}(mode 600 — never commit this)${N}"
+fi
+
+head2 "4. Load it into GitHub"
+if have gh; then
+    say "  ${D}gh CLI detected${N}"
+else
+    say "  ${Y}gh CLI not installed${N} — https://cli.github.com  (or paste manually in the UI)"
+fi
+say ""
+say "  ${D}# all four secrets in one shot, from the .env file${N}"
+say "  gh secret set -f ${ENV_FILE}${REPO:+ --repo $REPO}"
+say ""
+say "  ${D}# or one by one — stdin form is the safest for the multi-line key${N}"
+say "  gh secret set VPS_HOST     --body \"$VPS_HOST\"${REPO:+ --repo $REPO}"
+say "  gh secret set VPS_PORT     --body \"$VPS_PORT\"${REPO:+ --repo $REPO}"
+say "  gh secret set VPS_USERNAME --body \"$VPS_USER\"${REPO:+ --repo $REPO}"
+say "  gh secret set VPS_SSH_KEY${REPO:+ --repo $REPO} < $KEY_PATH"
+say ""
+say "  ${D}# and the deploy key${N}"
+say "  gh repo deploy-key add $KEY_PATH.pub --title \"vps-$(hostname -s 2>/dev/null || echo deploy)\"${REPO:+ --repo $REPO}"
+
+# --- 10. optional: do it automatically ------------------------------------------
+if [ "$PUSH" -eq 1 ]; then
+    head2 "5. Pushing to $REPO"
+    have gh || die "--push needs the gh CLI: https://cli.github.com"
+    gh auth status >/dev/null 2>&1 </dev/null || die "gh is not logged in — run: gh auth login"
+
+    for pair in "VPS_HOST=$VPS_HOST" "VPS_PORT=$VPS_PORT" "VPS_USERNAME=$VPS_USER"; do
+        name="${pair%%=*}"; value="${pair#*=}"
+        gh secret set "$name" --repo "$REPO" --body "$value" </dev/null \
+            && say "  ${G}set${N} $name" \
+            || warn "failed to set $name"
+    done
+    gh secret set VPS_SSH_KEY --repo "$REPO" <"$KEY_PATH" \
+        && say "  ${G}set${N} VPS_SSH_KEY" \
+        || warn "failed to set VPS_SSH_KEY"
+
+    if gh repo deploy-key add "$KEY_PATH.pub" --repo "$REPO" \
+           --title "vps-$(hostname -s 2>/dev/null || echo deploy)" </dev/null 2>/dev/null; then
+        say "  ${G}added${N} deploy key"
+    else
+        say "  ${Y}deploy key not added${N} — it is probably already there, or the token lacks admin scope"
+    fi
 fi
 
 if [ "$SAVE_SUMMARY" -eq 1 ]; then
     SUM="$HOME/github-deploy-info.txt"
+    umask 077
     {
         echo "generated: $(date -Is)"
         echo "VPS_HOST     = $VPS_HOST"
@@ -297,5 +382,6 @@ if [ "$SAVE_SUMMARY" -eq 1 ]; then
 fi
 
 head2 "Done"
-say "Verify afterwards with:  ssh -T git@github.com"
+say "Verify on this box with:   ssh -T git@github.com"
+[ "$WRITE_ENV" -eq 1 ] && say "Shred the env file when finished:  shred -u $ENV_FILE"
 say ""
