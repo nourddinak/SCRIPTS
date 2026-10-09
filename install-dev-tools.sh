@@ -5,6 +5,7 @@
 # Installs and updates Node.js, npm, PM2, Python, Rust, Go, Docker, Git, etc.
 # Automatically detects what's missing and installs the latest versions.
 # Safe to run multiple times - won't reinstall if already present.
+# Supports snap installation for various tools
 ################################################################################
 
 set -e
@@ -78,6 +79,16 @@ update_packages() {
 # Check if command exists
 command_exists() {
     command -v "$1" &> /dev/null
+}
+
+# Install snapd if not already installed
+install_snapd() {
+    if ! command_exists snap; then
+        log_info "Installing snapd..."
+        update_packages
+        eval $INSTALL_CMD snapd
+        log_success "snapd installed"
+    fi
 }
 
 ################################################################################
@@ -293,6 +304,42 @@ install_build_tools() {
 }
 
 ################################################################################
+# SNAP TOOLS
+################################################################################
+
+# Install Caddy via snap
+install_caddy_snap() {
+    if command_exists caddy; then
+        log_success "Caddy is already installed ($(caddy version))"
+    else
+        log_info "Installing Caddy via snap..."
+        install_snapd
+        sudo snap install caddy
+        log_success "Caddy installed via snap"
+    fi
+}
+
+# Install common snap tools
+install_common_snap_tools() {
+    log_info "Installing common tools via snap..."
+    install_snapd
+    
+    # List of useful snap tools (add more as needed)
+    local snap_tools=("caddy" "htop" "tree" "jq")
+    
+    for tool in "${snap_tools[@]}"; do
+        if ! command_exists "$tool" 2>/dev/null && ! sudo snap list 2>/dev/null | grep -q "^$tool"; then
+            log_info "Installing $tool via snap..."
+            sudo snap install "$tool" || log_warn "$tool installation via snap failed"
+        else
+            log_success "$tool is already installed"
+        fi
+    done
+    
+    log_success "Snap tools installation complete"
+}
+
+################################################################################
 # MAIN MENU
 ################################################################################
 show_menu() {
@@ -312,9 +359,11 @@ show_menu() {
     echo "8. Docker"
     echo "9. Git LFS"
     echo "10. Build tools (gcc, make, etc)"
+    echo "11. Caddy (via snap)"
+    echo "12. Common snap tools (Caddy, htop, tree, jq)"
     echo "0. Exit"
     echo ""
-    read -p "Enter your choice [0-10]: " choice
+    read -p "Enter your choice [0-12]: " choice
 }
 
 ################################################################################
@@ -359,6 +408,10 @@ print_summary() {
         echo -e "${GREEN}✓${NC} Docker:   $(docker --version)"
     fi
     
+    if command_exists caddy; then
+        echo -e "${GREEN}✓${NC} Caddy:    $(caddy version)"
+    fi
+    
     echo ""
 }
 
@@ -392,6 +445,7 @@ main() {
             install_go
             install_docker
             install_git_lfs
+            install_caddy_snap
             ;;
         2)
             install_git
@@ -421,6 +475,12 @@ main() {
             ;;
         10)
             install_build_tools
+            ;;
+        11)
+            install_caddy_snap
+            ;;
+        12)
+            install_common_snap_tools
             ;;
         0)
             log_info "Exiting..."
