@@ -3,10 +3,10 @@
 #  setup-github.sh — GitHub Actions -> VPS deploy bootstrapper
 #
 #  QUICK RUN (recommended, keeps stdin usable):
-#      bash <(curl -fsSL https://github.com/nourddinak/SCRIPTS/setup-github.sh)
+#      bash <(curl -fsSL https://github.com/nourddinak/SCRIPTS/raw/main/setup-github.sh)
 #
 #  PIPE STYLE (works too, args go after -s --):
-#      curl -fsSL https://github.com/nourddinak/SCRIPTS/setup-github.sh | bash -s -- --port 2222
+#      curl -fsSL https://github.com/nourddinak/SCRIPTS/raw/main/setup-github.sh | bash -s -- --port 2222
 #
 #  CLASSIC:
 #      curl -fsSL -o setup-github.sh https://your.domain/setup-github.sh
@@ -24,6 +24,7 @@
 #      -f, --force           regenerate the key even if one exists
 #          --no-private      never print the private key on screen
 #          --save            write a summary file to ~/github-deploy-info.txt
+#          --setup-vps       auto-setup authorized_keys on VPS (requires SSH access & sudo)
 #      -q, --quiet           less noise
 #      -h, --help            this help
 # ==============================================================================
@@ -43,6 +44,8 @@ QUIET=0
 OVERRIDE_HOST=""
 OVERRIDE_PORT=""
 OVERRIDE_USER=""
+SETUP_VPS=0
+DEPLOY_USER="deploy"
 
 SSH_DIR="$HOME/.ssh"
 MARK_BEGIN="# >>> setup-github.sh managed block >>>"
@@ -60,7 +63,7 @@ say()   { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 step()  { [ "$QUIET" -eq 1 ] || printf '%s==>%s %s\n' "$G" "$N" "$*"; }
 warn()  { printf '%s[!]%s %s\n' "$Y" "$N" "$*" >&2; }
 die()   { printf '%s[x]%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
-rule()  { [ "$QUIET" -eq 1 ] || printf '%s%s%s\n' "$B" "──────────────────────────────────────────────────────────" "$N"; }
+rule()  { [ "$QUIET" -eq 1 ] || printf '%s%s%s\n' "$B" "─────────────────────────────────────────────────" "$N"; }
 head2() { [ "$QUIET" -eq 1 ] || { printf '\n'; rule; printf '%s %s%s\n' "$B" "$*" "$N"; rule; }; }
 
 trap 'die "failed at line $LINENO"' ERR
@@ -68,20 +71,22 @@ trap 'die "failed at line $LINENO"' ERR
 # --- arg parsing --------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
-        -n|--key-name)  KEY_NAME="${2:?missing value}"; shift 2 ;;
-        -H|--host)      OVERRIDE_HOST="${2:?missing value}"; shift 2 ;;
-        -p|--port)      OVERRIDE_PORT="${2:?missing value}"; shift 2 ;;
-        -u|--user)      OVERRIDE_USER="${2:?missing value}"; shift 2 ;;
-        -f|--force)     FORCE=1; shift ;;
-        --no-private)   PRINT_PRIVATE=0; shift ;;
-        -e|--env)       WRITE_ENV=1; shift ;;
-        --env-file)     WRITE_ENV=1; ENV_FILE="${2:?missing value}"; shift 2 ;;
-        -r|--repo)      REPO="${2:?missing value}"; shift 2 ;;
-        --push)         PUSH=1; WRITE_ENV=1; shift ;;
-        --save)         SAVE_SUMMARY=1; shift ;;
-        -q|--quiet)     QUIET=1; shift ;;
-        -h|--help)      sed -n '2,29p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *)              die "unknown option: $1  (try --help)" ;;
+        -n|--key-name)       KEY_NAME="${2:?missing value}"; shift 2 ;;
+        -H|--host)           OVERRIDE_HOST="${2:?missing value}"; shift 2 ;;
+        -p|--port)           OVERRIDE_PORT="${2:?missing value}"; shift 2 ;;
+        -u|--user)           OVERRIDE_USER="${2:?missing value}"; shift 2 ;;
+        -f|--force)          FORCE=1; shift ;;
+        --no-private)        PRINT_PRIVATE=0; shift ;;
+        -e|--env)            WRITE_ENV=1; shift ;;
+        --env-file)          WRITE_ENV=1; ENV_FILE="${2:?missing value}"; shift 2 ;;
+        -r|--repo)           REPO="${2:?missing value}"; shift 2 ;;
+        --push)              PUSH=1; WRITE_ENV=1; shift ;;
+        --save)              SAVE_SUMMARY=1; shift ;;
+        --setup-vps)         SETUP_VPS=1; shift ;;
+        --deploy-user)       DEPLOY_USER="${2:?missing value}"; shift 2 ;;
+        -q|--quiet)          QUIET=1; shift ;;
+        -h|--help)           sed -n '2,33p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)                   die "unknown option: $1  (try --help)" ;;
     esac
 done
 
@@ -144,6 +149,83 @@ is_private_ip() {
         100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;  # CGNAT
         *) return 1 ;;
     esac
+}
+
+setup_vps_authorized_keys() {
+    local vps_host="$1"
+    local vps_port="$2"
+    local vps_user="$3"
+    local public_key_file="$KEY_PATH.pub"
+    local remote_ssh_dir="/home/$DEPLOY_USER/.ssh"
+    local remote_auth_keys="$remote_ssh_dir/authorized_keys"
+
+    step "Setting up authorized_keys on VPS ($vps_host)"
+
+    # Verify the public key exists
+    if [ ! -f "$public_key_file" ]; then
+        die "Public key not found: $public_key_file"
+    fi
+
+    local pub_key; pub_key="$(cat "$public_key_file")"
+
+    # Create a temp script to run on the VPS
+    local setup_script; setup_script="$(mktemp)"
+    cat >"$setup_script" <<'REMOTE_SCRIPT'
+#!/bin/bash
+set -e
+DEPLOY_USER="$1"
+PUBLIC_KEY="$2"
+SSH_DIR="/home/$DEPLOY_USER/.ssh"
+AUTH_KEYS="$SSH_DIR/authorized_keys"
+
+# Create SSH directory
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+chown "$DEPLOY_USER:$DEPLOY_USER" "$SSH_DIR"
+
+# Backup if exists
+if [ -f "$AUTH_KEYS" ]; then
+    cp "$AUTH_KEYS" "$AUTH_KEYS.backup.$(date +%s)"
+    chmod 600 "$AUTH_KEYS.backup".*
+fi
+
+# Add key if not present
+if ! grep -qF "$PUBLIC_KEY" "$AUTH_KEYS" 2>/dev/null; then
+    echo "$PUBLIC_KEY" >> "$AUTH_KEYS"
+fi
+
+# Set permissions
+chmod 600 "$AUTH_KEYS"
+chmod 700 "$SSH_DIR"
+chown "$DEPLOY_USER:$DEPLOY_USER" "$SSH_DIR" "$AUTH_KEYS"
+
+echo "OK"
+REMOTE_SCRIPT
+
+    # Execute on VPS via SSH
+    local result; result="$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+        -p "$vps_port" "$vps_user@$vps_host" \
+        "bash -s '$DEPLOY_USER' '$pub_key'" <"$setup_script" 2>&1 || echo "FAILED")"
+
+    rm -f "$setup_script"
+
+    if [ "$result" = "OK" ]; then
+        say "  ${G}✓ authorized_keys configured on VPS${N}"
+        say "  ${D}User: $DEPLOY_USER  |  Host: $vps_host:$vps_port${N}"
+        return 0
+    else
+        warn "VPS setup may have failed. Output:"
+        printf '%s\n' "$result" | sed 's/^/    /'
+        warn "You may need to manually add the public key:"
+        say ""
+        say "  On VPS as $vps_user:"
+        say "  sudo mkdir -p /home/$DEPLOY_USER/.ssh"
+        say "  sudo chmod 700 /home/$DEPLOY_USER/.ssh"
+        say "  echo '$pub_key' | sudo tee -a /home/$DEPLOY_USER/.ssh/authorized_keys"
+        say "  sudo chmod 600 /home/$DEPLOY_USER/.ssh/authorized_keys"
+        say "  sudo chown -R $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh"
+        return 1
+    fi
 }
 
 # --- 1. dependencies ----------------------------------------------------------
@@ -279,7 +361,12 @@ fi
 VPS_PORT="${OVERRIDE_PORT:-$(detect_port)}"
 VPS_USER="${OVERRIDE_USER:-$(id -un)}"
 
-# --- 8. build the .env payload -------------------------------------------------
+# --- 8. setup VPS authorized_keys (optional) ---------------------------------
+if [ "$SETUP_VPS" -eq 1 ]; then
+    setup_vps_authorized_keys "$VPS_HOST" "$VPS_PORT" "$VPS_USER"
+fi
+
+# --- 9. build the .env payload -------------------------------------------------
 # command substitution strips trailing newlines, so the closing quote is
 # printed on its own line to preserve the newline OpenSSH keys require.
 ENV_CONTENT="$(
@@ -292,7 +379,7 @@ ENV_CONTENT="$(
     printf ''
 )"
 
-# --- 9. output -----------------------------------------------------------------
+# --- 10. output -----------------------------------------------------------------
 head2 "1. Deploy key  →  Repo · Settings · Deploy keys · Add deploy key"
 cat "$KEY_PATH.pub"
 say "${D}(tick \"Allow write access\" only if the workflow pushes back)${N}"
@@ -339,7 +426,7 @@ say ""
 say "  ${D}# and the deploy key${N}"
 say "  gh repo deploy-key add $KEY_PATH.pub --title \"vps-$(hostname -s 2>/dev/null || echo deploy)\"${REPO:+ --repo $REPO}"
 
-# --- 10. optional: do it automatically ------------------------------------------
+# --- 11. optional: do it automatically ------------------------------------------
 if [ "$PUSH" -eq 1 ]; then
     head2 "5. Pushing to $REPO"
     have gh || die "--push needs the gh CLI: https://cli.github.com"
@@ -384,4 +471,7 @@ fi
 head2 "Done"
 say "Verify on this box with:   ssh -T git@github.com"
 [ "$WRITE_ENV" -eq 1 ] && say "Shred the env file when finished:  shred -u $ENV_FILE"
+if [ "$SETUP_VPS" -eq 1 ]; then
+    say "${G}✓${N} VPS authorized_keys configured — GitHub Actions can now SSH to your VPS"
+fi
 say ""
