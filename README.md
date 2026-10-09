@@ -1,3 +1,4 @@
+
 # SCRIPTS
 
 Server bootstrap scripts. One command each, no dependencies to install first.
@@ -5,6 +6,155 @@ Server bootstrap scripts. One command each, no dependencies to install first.
 | Script | What it does |
 |---|---|
 | [`setup-github.sh`](setup-github.sh) | Prepares a VPS for GitHub Actions deployment: generates a deploy key, configures SSH, and prints the exact repository secrets to paste into GitHub. |
+| [`install-dev-tools.sh`](install-dev-tools.sh) | Installs and updates development tools: Node.js, npm, PM2, Python, Rust, Go, Docker, Git, and build tools. Auto-detects what's missing and installs latest versions. |
+
+---
+
+## install-dev-tools.sh
+
+Automatically installs and updates all essential development tools. Checks if each tool is already installed and only installs what's missing. Safe to run multiple times.
+
+### Quick start
+
+Run this on any Linux VPS or local machine:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/install-dev-tools.sh)
+```
+
+Or with a specific tool (1-10):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/install-dev-tools.sh) 1
+```
+
+Prefer to read before you run? (recommended)
+
+```bash
+curl -fsSL -o install-dev-tools.sh https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/install-dev-tools.sh
+less install-dev-tools.sh
+chmod +x install-dev-tools.sh && ./install-dev-tools.sh
+```
+
+### What it does
+
+- **Detects your package manager** (apt, dnf, yum, pacman, zypper, apk) automatically
+- **Checks if tools are already installed** — skips re-installation
+- **Installs latest versions** of all tools
+- **Handles dependencies** (e.g., installs npm alongside Node.js)
+- **Sets up services** (e.g., Docker daemon startup)
+- **Color-coded output** so you can see what succeeded and what failed
+- **Safe to run multiple times** — idempotent
+
+### Menu options
+
+```
+1. Everything (recommended)        — All tools below
+2. Git + curl                       — Git version control & curl
+3. Node.js + npm                    — JavaScript runtime & package manager
+4. PM2                              — Node.js process manager
+5. Python 3                         — Python with pip & venv
+6. Rust                             — Systems programming language
+7. Go                               — Google's compiled language
+8. Docker                           — Container platform
+9. Git LFS                          — Large File Storage for Git
+10. Build tools                     — gcc, make, build-essential, etc.
+0. Exit
+```
+
+### Usage examples
+
+**Install everything:**
+```bash
+./install-dev-tools.sh 1
+```
+
+**Install just Node.js & npm:**
+```bash
+./install-dev-tools.sh 3
+```
+
+**Interactive menu:**
+```bash
+./install-dev-tools.sh
+# Then type your choice
+```
+
+**Download and run in one command:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/install-dev-tools.sh | bash -s -- 1
+```
+
+### Supported systems
+
+- **Debian/Ubuntu** (apt)
+- **RHEL/CentOS/Fedora** (dnf/yum)
+- **Arch Linux** (pacman)
+- **openSUSE** (zypper)
+- **Alpine** (apk)
+
+### What gets installed
+
+| Tool | Installed from | Latest version |
+|---|---|---|
+| Git | Package manager | Latest |
+| curl | Package manager | Latest |
+| Node.js | NodeSource (apt) or package manager | LTS |
+| npm | With Node.js, then upgraded globally | Latest |
+| PM2 | npm global | Latest |
+| Python 3 | Package manager | Latest |
+| Rust | rustup.rs | Latest |
+| Go | Package manager or golang.org | Latest |
+| Docker | Docker official repos | Latest |
+| Git LFS | GitHub official repos | Latest |
+| Build tools | Package manager | Latest |
+
+### After running
+
+Check your installations:
+
+```bash
+git --version
+node --version
+npm --version
+pm2 --version
+python3 --version
+rustc --version
+go version
+docker --version
+```
+
+If you installed PM2, start the startup script (optional but recommended):
+
+```bash
+pm2 startup
+```
+
+### Notes
+
+- **Sudo required** if you're not root (script handles this)
+- **Interactive input** — script may ask for your password
+- **Network access** required for downloading (curl, rustup, etc.)
+- **Idempotent** — safe to run multiple times, won't duplicate installs
+- **Colored output** — [INFO], [✓], [WARN], [✗] make it easy to scan
+
+### Troubleshooting
+
+**"No supported package manager found"**
+- Your system isn't one of the supported distributions
+- Try installing tools manually
+
+**"npm update failed, continuing..."**
+- Minor issue, npm is still functional
+- You can manually update later with `sudo npm install -g npm@latest`
+
+**"git-lfs not available via package manager"**
+- Git LFS might not be in your distro's repos
+- You can install from GitHub: https://git-lfs.github.com
+
+**Sudo password prompt**
+- This is normal — the script needs elevated privileges to install system packages
+- Run it in an interactive terminal or with `sudo` at the start
 
 ---
 
