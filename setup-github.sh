@@ -1,321 +1,265 @@
 #!/usr/bin/env bash
-# setup-github.sh — GitHub Actions -> VPS deploy bootstrapper
+# setup-github.sh — Bootstrap GitHub Actions SSH deployment to a VPS.
+# Run this ON the VPS to authorize the generated key locally, or run it on
+# your workstation with --remote-setup to install the public key over SSH.
 
 set -Eeuo pipefail
+umask 077
 
 KEY_NAME="deploy_key"
 FORCE=0
-PRINT_PRIVATE=1
-SAVE_SUMMARY=0
+PRINT_PRIVATE=0
 WRITE_ENV=0
-ENV_FILE=""
+ENV_FILE="$HOME/github-deploy.env"
 REPO=""
 PUSH=0
+SAVE_SUMMARY=0
+REMOTE_SETUP=0
+HOST=""
+PORT=""
+LOGIN_USER=""
+DEPLOY_USER=""
 QUIET=0
-OVERRIDE_HOST=""
-OVERRIDE_PORT=""
-OVERRIDE_USER=""
-SETUP_VPS=0
-DEPLOY_USER="deploy"
 
 SSH_DIR="$HOME/.ssh"
 MARK_BEGIN="# >>> setup-github.sh managed block >>>"
 MARK_END="# <<< setup-github.sh managed block <<<"
 
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-    R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'; B=$'\033[0;34m'; D=$'\033[2m'; N=$'\033[0m'
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  R=$'\033[0;31m'; G=$'\033[0;32m'; Y=$'\033[1;33m'; B=$'\033[0;34m'; N=$'\033[0m'
 else
-    R=""; G=""; Y=""; B=""; D=""; N=""
+  R=""; G=""; Y=""; B=""; N=""
 fi
 
-say()   { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
-step()  { [ "$QUIET" -eq 1 ] || printf '%s==>%s %s\n' "$G" "$N" "$*"; }
-warn()  { printf '%s[!]%s %s\n' "$Y" "$N" "$*" >&2; }
-die()   { printf '%s[x]%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
-
-trap 'die "failed at line $LINENO"' ERR
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -n|--key-name)       KEY_NAME="${2:?missing value}"; shift 2 ;;
-        -H|--host)           OVERRIDE_HOST="${2:?missing value}"; shift 2 ;;
-        -p|--port)           OVERRIDE_PORT="${2:?missing value}"; shift 2 ;;
-        -u|--user)           OVERRIDE_USER="${2:?missing value}"; shift 2 ;;
-        -f|--force)          FORCE=1; shift ;;
-        --no-private)        PRINT_PRIVATE=0; shift ;;
-        -e|--env)            WRITE_ENV=1; shift ;;
-        --env-file)          WRITE_ENV=1; ENV_FILE="${2:?missing value}"; shift 2 ;;
-        -r|--repo)           REPO="${2:?missing value}"; shift 2 ;;
-        --push)              PUSH=1; WRITE_ENV=1; shift ;;
-        --save)              SAVE_SUMMARY=1; shift ;;
-        --setup-vps)         SETUP_VPS=1; shift ;;
-        --deploy-user)       DEPLOY_USER="${2:?missing value}"; shift 2 ;;
-        -q|--quiet)          QUIET=1; shift ;;
-        -h|--help)           echo "Usage: $0 [--setup-vps] [--push] [-r owner/repo] [-e] [--env-file PATH] [-H HOST] [-p PORT] [-u USER] [-f] [--deploy-user NAME] [--save] [-q]"; exit 0 ;;
-        *)                   die "unknown option: $1" ;;
-    esac
-done
-
-KEY_PATH="$SSH_DIR/$KEY_NAME"
-ENV_FILE="${ENV_FILE:-$HOME/github-deploy.env}"
-
-if [ ! -t 0 ] && (exec </dev/tty) 2>/dev/null; then
-    exec </dev/tty
-fi
-
-say "${G}GitHub VPS Deployment Setup${N}"
-say ""
-
+say()  { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"; }
+step() { [[ "$QUIET" -eq 1 ]] || printf '%s==>%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$Y" "$N" "$*" >&2; }
+die()  { printf '%s[x]%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-as_root() {
-    if [ "$(id -u)" -eq 0 ]; then "$@"
-    elif have sudo; then sudo "$@"
-    else die "need sudo or root privileges"
-    fi
-}
+usage() {
+  cat <<'EOF'
+Usage: ./setup-github.sh [options]
 
-install_pkg() {
-    local pkg="$1"
-    if have apt-get; then
-        as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
-        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" || die "install failed"
-    elif have dnf; then as_root dnf install -y -q "$pkg"
-    elif have yum; then as_root yum install -y -q "$pkg"
-    elif have apk; then as_root apk add --no-cache "$pkg"
-    fi
-}
+Options:
+  -n, --key-name NAME     SSH key name (default: deploy_key)
+  -H, --host HOST         Public IP or hostname of the VPS
+  -p, --port PORT         VPS SSH port (default: detected/22)
+  -u, --user USER         SSH login username (default: current user)
+      --deploy-user USER  Account on the VPS whose authorized_keys is updated
+      --remote-setup      Install the public key on the VPS over SSH.
+                          Requires existing SSH access to the VPS.
+  -r, --repo OWNER/REPO   GitHub repository (for example: owner/my-app)
+      --push              Set GitHub repository secrets using the gh CLI
+  -e, --env               Write secrets to ~/github-deploy.env (private file)
+      --env-file PATH     Write the environment file to PATH
+      --print-private     Print the private key (unsafe; avoid if possible)
+      --save              Save non-secret connection details to a summary file
+  -f, --force             Back up and replace an existing key
+  -q, --quiet             Reduce normal output
+  -h, --help              Show this help
 
-is_ipv4() {
-    local ip="${1:-}"
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-}
+Typical use ON the VPS:
+  chmod +x setup-github.sh
+  ./setup-github.sh --repo OWNER/REPO --push
 
-is_private_ip() {
-    case "${1:-}" in
-        10.*|127.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+Typical use from your workstation:
+  ./setup-github.sh -H VPS_PUBLIC_IP -u ubuntu --remote-setup --repo OWNER/REPO --push
 
-setup_vps_authorized_keys() {
-    local vps_host="$1"
-    local vps_port="$2"
-    local vps_user="$3"
-    local public_key_file="$KEY_PATH.pub"
-
-    step "Setting up authorized_keys on VPS"
-
-    if [ ! -f "$public_key_file" ]; then
-        die "Public key not found: $public_key_file"
-    fi
-
-    local pub_key; pub_key="$(cat "$public_key_file")"
-    local setup_script; setup_script="$(mktemp)"
-
-    cat >"$setup_script" <<'EOF'
-#!/bin/bash
-DEPLOY_USER="$1"
-PUBLIC_KEY="$2"
-SSH_DIR="/home/$DEPLOY_USER/.ssh"
-AUTH_KEYS="$SSH_DIR/authorized_keys"
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
-chown "$DEPLOY_USER:$DEPLOY_USER" "$SSH_DIR"
-[ -f "$AUTH_KEYS" ] && cp "$AUTH_KEYS" "$AUTH_KEYS.backup.$(date +%s)" && chmod 600 "$AUTH_KEYS.backup".*
-grep -qF "$PUBLIC_KEY" "$AUTH_KEYS" 2>/dev/null || echo "$PUBLIC_KEY" >> "$AUTH_KEYS"
-chmod 600 "$AUTH_KEYS"
-chown "$DEPLOY_USER:$DEPLOY_USER" "$SSH_DIR" "$AUTH_KEYS"
-echo "OK"
+GitHub CLI must already be authenticated (`gh auth login`) for --push.
+The script never opens cloud firewall/security-list ports. Allow TCP/22 (or your
+custom SSH port) in the VPS firewall and Oracle Cloud security list/NSG.
 EOF
-
-    local result; result="$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "$vps_port" "$vps_user@$vps_host" "bash -s '$DEPLOY_USER' '$pub_key'" <"$setup_script" 2>&1 || echo "FAILED")"
-    rm -f "$setup_script"
-
-    if [ "$result" = "OK" ]; then
-        say "  ${G}✓ authorized_keys configured${N}"
-        return 0
-    else
-        warn "VPS setup failed. Manual setup:"
-        say "sudo mkdir -p /home/$DEPLOY_USER/.ssh && sudo chmod 700 /home/$DEPLOY_USER/.ssh"
-        say "echo '$pub_key' | sudo tee -a /home/$DEPLOY_USER/.ssh/authorized_keys >/dev/null"
-        say "sudo chmod 600 /home/$DEPLOY_USER/.ssh/authorized_keys"
-        say "sudo chown -R $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh"
-        return 1
-    fi
 }
-
-step "Checking dependencies"
-for bin in git curl ssh-keygen; do
-    if ! have "$bin"; then
-        say "  installing $bin"
-        install_pkg "$bin" || install_pkg openssh-client
-    fi
+while (($#)); do
+  case "$1" in
+    -n|--key-name) KEY_NAME="${2:?missing value}"; shift 2 ;;
+    -H|--host) HOST="${2:?missing value}"; shift 2 ;;
+    -p|--port) PORT="${2:?missing value}"; shift 2 ;;
+    -u|--user) LOGIN_USER="${2:?missing value}"; shift 2 ;;
+    --deploy-user) DEPLOY_USER="${2:?missing value}"; shift 2 ;;
+    --remote-setup) REMOTE_SETUP=1; shift ;;
+    -r|--repo) REPO="${2:?missing value}"; shift 2 ;;
+    --push) PUSH=1; shift ;;
+    -e|--env) WRITE_ENV=1; shift ;;
+    --env-file) ENV_FILE="${2:?missing value}"; WRITE_ENV=1; shift 2 ;;
+    --print-private) PRINT_PRIVATE=1; shift ;;
+    --save) SAVE_SUMMARY=1; shift ;;
+    -f|--force) FORCE=1; shift ;;
+    -q|--quiet) QUIET=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
 done
 
-step "Creating SSH directory"
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
+[[ "$KEY_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid key name"
+KEY_PATH="$SSH_DIR/$KEY_NAME"
+PUB_PATH="$KEY_PATH.pub"
+[[ -n "$DEPLOY_USER" ]] || DEPLOY_USER="${LOGIN_USER:-$(id -un)}"
 
-step "Generating deploy key"
-if [ -f "$KEY_PATH" ] && [ "$FORCE" -eq 0 ]; then
-    say "  using existing key at $KEY_PATH"
-else
-    [ -f "$KEY_PATH" ] && cp -a "$KEY_PATH" "$KEY_PATH.bak.$(date +%s)"
-    rm -f "$KEY_PATH" "$KEY_PATH.pub"
-    ssh-keygen -q -t ed25519 -a 100 -C "github-actions@$(hostname -s 2>/dev/null || echo vps)" -f "$KEY_PATH" -N "" </dev/null
-    say "  ${G}created${N} at $KEY_PATH"
-fi
-chmod 600 "$KEY_PATH"
-chmod 644 "$KEY_PATH.pub"
-
-step "Configuring SSH"
-CFG="$SSH_DIR/config"
-touch "$CFG"
-if ! grep -qF "$MARK_BEGIN" "$CFG"; then
-    [ -s "$CFG" ] && cp -a "$CFG" "$CFG.bak.$(date +%s)"
-    {
-        printf '%s\n' "$MARK_BEGIN"
-        printf 'Host github.com\n'
-        printf '    HostName github.com\n'
-        printf '    User git\n'
-        printf '    IdentityFile %s\n' "$KEY_PATH"
-        printf '    IdentitiesOnly yes\n'
-        printf '    StrictHostKeyChecking accept-new\n'
-        printf '%s\n' "$MARK_END"
-    } >>"$CFG"
-    chmod 600 "$CFG"
-else
-    say "  already configured"
-fi
-
-step "Adding GitHub host keys"
-KH="$SSH_DIR/known_hosts"
-touch "$KH"; chmod 600 "$KH"
-if ! ssh-keygen -F github.com -f "$KH" >/dev/null 2>&1; then
-    ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >>"$KH" || true
-fi
-
-step "Testing GitHub auth"
-AUTH_OUT="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com </dev/null 2>&1 || true)"
-if printf '%s' "$AUTH_OUT" | grep -qi "successfully authenticated"; then
-    say "  ${G}✓ authenticated${N}"
-else
-    say "  ${Y}not authorized yet${N} (normal on first run)"
-fi
-
-step "Detecting connection details"
-
-detect_public_ip() {
-    local ip
-    for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
-        ip="$(curl -fsS4 --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')" || ip=""
-        is_ipv4 "$ip" && { printf '%s' "$ip"; return 0; }
-    done
-    return 1
-}
-
-detect_local_ip() {
-    local ip=""
-    have ip && ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')" || true
-    [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    printf '%s' "$ip"
+as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then "$@"
+  elif have sudo; then sudo "$@"
+  else die "root/sudo is required to update another user's authorized_keys"
+  fi
 }
 
 detect_port() {
-    local p
-    p="$(grep -rhsE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1)" || true
-    [ -n "$p" ] || p=22
-    printf '%s' "$p"
+  local p=""
+  if [[ -r /etc/ssh/sshd_config ]]; then
+    p="$(awk 'tolower($1)=="port" && $1 !~ /^#/ {print $2; exit}' /etc/ssh/sshd_config)"
+  fi
+  printf '%s' "${p:-22}"
+}
+detect_public_ip() {
+  local ip=""
+  for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+    ip="$(curl -4fsS --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '%s' "$ip"; return 0
+    fi
+  done
+  return 1
 }
 
-LOCAL_IP="$(detect_local_ip)"
-PUBLIC_IP="$(detect_public_ip || true)"
+step "Checking dependencies"
+for bin in ssh-keygen ssh; do
+  have "$bin" || die "$bin is required; install the OpenSSH client package and retry"
+done
+if [[ "$PUSH" -eq 1 ]]; then
+  have gh || die "GitHub CLI (gh) is required for --push: https://cli.github.com"
+  [[ -n "$REPO" && "$REPO" == */* ]] || die "--push requires -r OWNER/REPO"
+fi
 
-if [ -n "$OVERRIDE_HOST" ]; then
-    VPS_HOST="$OVERRIDE_HOST"
-elif [ -n "$PUBLIC_IP" ]; then
-    VPS_HOST="$PUBLIC_IP"
-elif [ -n "$LOCAL_IP" ] && ! is_private_ip "$LOCAL_IP"; then
-    VPS_HOST="$LOCAL_IP"
+step "Creating SSH directory and deploy key"
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+if [[ -f "$KEY_PATH" && -f "$PUB_PATH" && "$FORCE" -eq 0 ]]; then
+  say "  Reusing existing key: $KEY_PATH"
 else
-    VPS_HOST="${LOCAL_IP:-UNKNOWN}"
-    warn "Private IP detected - won't work with GitHub Actions. Use: -H YOUR.PUBLIC.IP"
+  if [[ -e "$KEY_PATH" || -e "$PUB_PATH" ]]; then
+    cp -a "$KEY_PATH" "$KEY_PATH.bak.$(date +%s)" 2>/dev/null || true
+    cp -a "$PUB_PATH" "$PUB_PATH.bak.$(date +%s)" 2>/dev/null || true
+    rm -f "$KEY_PATH" "$PUB_PATH"
+  fi
+  ssh-keygen -q -t ed25519 -a 100 \
+    -C "github-actions-deploy@$(hostname -s 2>/dev/null || echo vps)" \
+    -f "$KEY_PATH" -N "" </dev/null
+  say "  Created $KEY_PATH"
+fi
+chmod 600 "$KEY_PATH"
+chmod 644 "$PUB_PATH"
+
+# Determine the endpoint values to store in GitHub.
+if [[ -z "$HOST" ]]; then
+  HOST="$(detect_public_ip || true)"
+fi
+[[ -n "$HOST" ]] || {
+  if [[ "$REMOTE_SETUP" -eq 0 ]]; then
+    HOST="REPLACE_WITH_VPS_PUBLIC_IP"
+    warn "Could not detect a public IP. Set VPS_HOST manually in GitHub or rerun with -H."
+  else
+    die "provide the VPS public IP/hostname with -H when using --remote-setup"
+  fi
+}
+PORT="${PORT:-$(detect_port)}"
+[[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT >= 1 && PORT <= 65535)) || die "invalid SSH port"
+LOGIN_USER="${LOGIN_USER:-$(id -un)}"
+
+step "Authorizing the public key for GitHub Actions"
+if [[ "$REMOTE_SETUP" -eq 1 ]]; then
+  [[ "$HOST" != "REPLACE_WITH_VPS_PUBLIC_IP" ]] || die "provide the VPS host with -H"
+  # Install the public key over SSH; existing authorized_keys entries are preserved.
+  cat "$PUB_PATH" | ssh -p "$PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+    "$LOGIN_USER@$HOST" "sudo bash -c 'u=\"$DEPLOY_USER\"; id \"\$u\" >/dev/null || exit 2; h=\$(getent passwd \"\$u\" | cut -d: -f6); test -n \"\$h\" || exit 3; install -d -m 700 -o \"\$u\" -g \"\$u\" \"\$h/.ssh\"; touch \"\$h/.ssh/authorized_keys\"; chown \"\$u:\$u\" \"\$h/.ssh/authorized_keys\"; chmod 600 \"\$h/.ssh/authorized_keys\"; k=\$(cat); grep -qxF -- \"\$k\" \"\$h/.ssh/authorized_keys\" || printf \"%s\\n\" \"\$k\" >> \"\$h/.ssh/authorized_keys\"; chown \"\$u:\$u\" \"\$h/.ssh/authorized_keys\"; chmod 600 \"\$h/.ssh/authorized_keys\"; echo OK'"
+  say "  Public key installed on $HOST for user $DEPLOY_USER"
+else
+  # Local mode is intended when this script is being run on the target VPS.
+  getent passwd "$DEPLOY_USER" >/dev/null 2>&1 || die "VPS user '$DEPLOY_USER' does not exist locally. Use --remote-setup from your workstation."
+  TARGET_HOME="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
+  [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]] || die "could not find home directory for $DEPLOY_USER"
+  as_root install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$TARGET_HOME/.ssh"
+  AUTH_KEYS="$TARGET_HOME/.ssh/authorized_keys"
+  as_root touch "$AUTH_KEYS"
+  as_root chown "$DEPLOY_USER:$DEPLOY_USER" "$AUTH_KEYS"
+  as_root chmod 600 "$AUTH_KEYS"
+  PUB_KEY="$(cat "$PUB_PATH")"
+  if ! as_root grep -qxF -- "$PUB_KEY" "$AUTH_KEYS" 2>/dev/null; then
+    printf '%s\n' "$PUB_KEY" | as_root tee -a "$AUTH_KEYS" >/dev/null
+  fi
+  as_root chown "$DEPLOY_USER:$DEPLOY_USER" "$AUTH_KEYS"
+  as_root chmod 600 "$AUTH_KEYS"
+  say "  Public key added to $AUTH_KEYS (existing keys preserved)"
 fi
 
-VPS_PORT="${OVERRIDE_PORT:-$(detect_port)}"
-VPS_USER="${OVERRIDE_USER:-$(id -un)}"
-
-say "  VPS_HOST=$VPS_HOST"
-say "  VPS_PORT=$VPS_PORT"
-say "  VPS_USERNAME=$VPS_USER"
-
-if [ "$SETUP_VPS" -eq 1 ]; then
-    setup_vps_authorized_keys "$VPS_HOST" "$VPS_PORT" "$VPS_USER"
+# SSH client configuration for GitHub itself. This key is also added as a repo
+# deploy key only when --push is requested; this enables git clone/pull access.
+CFG="$SSH_DIR/config"
+touch "$CFG"
+chmod 600 "$CFG"
+if ! grep -qF "$MARK_BEGIN" "$CFG"; then
+  [[ ! -s "$CFG" ]] || cp -a "$CFG" "$CFG.bak.$(date +%s)"
+  {
+    printf '%s\n' "$MARK_BEGIN"
+    printf 'Host github.com\n    HostName github.com\n    User git\n    IdentityFile %s\n    IdentitiesOnly yes\n    StrictHostKeyChecking accept-new\n' "$KEY_PATH"
+    printf '%s\n' "$MARK_END"
+  } >> "$CFG"
+else
+  warn "A setup-github.sh SSH config block already exists; left it unchanged."
 fi
 
-ENV_CONTENT="$(
-    printf '# GitHub Actions -> VPS  ·  %s\n' "$(date -Is)"
-    printf 'VPS_HOST=%s\n' "$VPS_HOST"
-    printf 'VPS_PORT=%s\n' "$VPS_PORT"
-    printf 'VPS_USERNAME=%s\n' "$VPS_USER"
+ENV_FILE="$(realpath -m "$ENV_FILE" 2>/dev/null || printf '%s' "$ENV_FILE")"
+if [[ "$WRITE_ENV" -eq 1 ]]; then
+  {
+    printf '# GitHub Actions -> VPS deployment secrets\n'
+    printf 'VPS_HOST=%s\n' "$HOST"
+    printf 'VPS_PORT=%s\n' "$PORT"
+    printf 'VPS_USERNAME=%s\n' "$DEPLOY_USER"
     printf 'VPS_SSH_KEY='
     cat "$KEY_PATH"
-    printf ''
-)"
-
-say ""
-say "${G}Deploy Public Key:${N}"
-cat "$KEY_PATH.pub"
-
-if [ "$PRINT_PRIVATE" -eq 1 ]; then
-    say ""
-    say "${G}Environment Variables:${N}"
-    printf '%s\n' "$ENV_CONTENT"
+    printf '\n'
+  } > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  say "  Saved secrets to $ENV_FILE (keep this file private)"
 fi
 
-if [ "$WRITE_ENV" -eq 1 ]; then
-    umask 077
-    printf '%s\n' "$ENV_CONTENT" >"$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    say "  ${G}saved${N} to $ENV_FILE"
+if [[ "$PUSH" -eq 1 ]]; then
+  step "Setting GitHub repository secrets for $REPO"
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run gh auth login first"
+  gh secret set VPS_HOST --repo "$REPO" --body "$HOST"
+  gh secret set VPS_PORT --repo "$REPO" --body "$PORT"
+  gh secret set VPS_USERNAME --repo "$REPO" --body "$DEPLOY_USER"
+  gh secret set VPS_SSH_KEY --repo "$REPO" < "$KEY_PATH"
+  say "  Repository secrets configured"
+  # Add key as a read-only repo deploy key for git pulls from the VPS.
+  if gh repo deploy-key add "$PUB_PATH" --repo "$REPO" --title "vps-deploy-$(hostname -s 2>/dev/null || echo setup)" 2>/dev/null; then
+    say "  Added public key as a repository deploy key (for VPS git access)"
+  else
+    warn "Could not add repository deploy key automatically. It may already exist or gh lacks permission."
+  fi
 fi
 
-if [ "$PUSH" -eq 1 ]; then
-    if [ -z "$REPO" ]; then
-        die "--push needs --repo OWNER/NAME"
-    fi
-    if ! have gh; then
-        die "gh CLI not installed: https://cli.github.com"
-    fi
-    
-    say ""
-    step "Pushing to GitHub ($REPO)"
-    
-    gh secret set VPS_HOST --repo "$REPO" --body "$VPS_HOST" && say "  set VPS_HOST"
-    gh secret set VPS_PORT --repo "$REPO" --body "$VPS_PORT" && say "  set VPS_PORT"
-    gh secret set VPS_USERNAME --repo "$REPO" --body "$VPS_USER" && say "  set VPS_USERNAME"
-    gh secret set VPS_SSH_KEY --repo "$REPO" <"$KEY_PATH" && say "  set VPS_SSH_KEY"
-    gh repo deploy-key add "$KEY_PATH.pub" --repo "$REPO" --title "vps-$(hostname -s 2>/dev/null || echo deploy)" && say "  added deploy key"
-fi
-
-if [ "$SAVE_SUMMARY" -eq 1 ]; then
-    SUM="$HOME/github-deploy-info.txt"
-    umask 077
-    {
-        echo "Generated: $(date -Is)"
-        echo "VPS_HOST=$VPS_HOST"
-        echo "VPS_PORT=$VPS_PORT"
-        echo "VPS_USERNAME=$VPS_USER"
-        echo ""
-        echo "Public key:"
-        cat "$KEY_PATH.pub"
-    } >"$SUM"
-    chmod 600 "$SUM"
-    say "Summary saved to $SUM"
+if [[ "$SAVE_SUMMARY" -eq 1 ]]; then
+  SUM="$HOME/github-deploy-info.txt"
+  {
+    printf 'Generated: %s\nVPS_HOST=%s\nVPS_PORT=%s\nVPS_USERNAME=%s\n\nPublic key:\n' "$(date -Is)" "$HOST" "$PORT" "$DEPLOY_USER"
+    cat "$PUB_PATH"
+  } > "$SUM"
+  chmod 600 "$SUM"
+  say "  Summary saved to $SUM"
 fi
 
 say ""
-say "${G}✓ Done!${N}"
-say "Verify GitHub auth: ssh -T git@github.com"
-[ "$WRITE_ENV" -eq 1 ] && say "Delete env file when done: rm $ENV_FILE"
+say "${G}Done.${N}"
+say "GitHub secrets expected by your workflow: VPS_HOST, VPS_PORT, VPS_USERNAME, VPS_SSH_KEY"
+say "Public key:"
+cat "$PUB_PATH"
+if [[ "$PRINT_PRIVATE" -eq 1 ]]; then
+  warn "The private key below is sensitive. Only paste it into the VPS_SSH_KEY GitHub secret."
+  cat "$KEY_PATH"
+else
+  say "Private key was not printed. It is stored at: $KEY_PATH"
+fi
+if [[ "$WRITE_ENV" -eq 1 ]]; then
+  warn "Delete the environment file after using it: rm -f '$ENV_FILE'"
+fi
