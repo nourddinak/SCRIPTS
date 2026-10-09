@@ -304,6 +304,31 @@ install_build_tools() {
 }
 
 ################################################################################
+# CADDY
+################################################################################
+install_caddy() {
+    if command_exists caddy; then
+        log_success "Caddy is already installed ($(caddy version))"
+    else
+        log_info "Installing Caddy..."
+        update_packages
+        
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            log_info "Adding Caddy official repository..."
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+            update_packages
+            eval $INSTALL_CMD caddy
+        else
+            log_info "Installing Caddy via package manager..."
+            eval $INSTALL_CMD caddy || log_warn "Caddy not available in standard repos, consider using snap"
+        fi
+        
+        log_success "Caddy installed"
+    fi
+}
+
+################################################################################
 # SNAP TOOLS
 ################################################################################
 
@@ -359,11 +384,12 @@ show_menu() {
     echo "8. Docker"
     echo "9. Git LFS"
     echo "10. Build tools (gcc, make, etc)"
-    echo "11. Caddy (via snap)"
-    echo "12. Common snap tools (Caddy, htop, tree, jq)"
+    echo "11. Caddy (official repo)"
+    echo "12. Caddy (via snap)"
+    echo "13. Common snap tools (Caddy, htop, tree, jq)"
     echo "0. Exit"
     echo ""
-    read -p "Enter your choice [0-12]: " choice
+    read -p "Enter your choice [0-13]: " choice
 }
 
 ################################################################################
@@ -445,7 +471,7 @@ main() {
             install_go
             install_docker
             install_git_lfs
-            install_caddy_snap
+            install_caddy
             ;;
         2)
             install_git
@@ -477,9 +503,12 @@ main() {
             install_build_tools
             ;;
         11)
-            install_caddy_snap
+            install_caddy
             ;;
         12)
+            install_caddy_snap
+            ;;
+        13)
             install_common_snap_tools
             ;;
         0)
