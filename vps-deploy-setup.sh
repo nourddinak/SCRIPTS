@@ -210,7 +210,18 @@ if command -v ufw >/dev/null 2>&1; then
   FWS="$($S ufw status 2>/dev/null)"
   if printf '%s' "$FWS" | grep -q 'Status: active'; then
     FW="ufw active"
-    for p in "$SSH_PORT" 80 443; do printf '%s' "$FWS" | grep -qE "^$p(/tcp)?[[:space:]].*ALLOW" || FW="$FW, $p not allowed"; done
+    # "To" column of ALLOW rules: 22/tcp, 80,443/tcp, 22,80,443/tcp, OpenSSH, "Caddy Full", "Nginx Full" ...
+    RULES="$(printf '%s\n' "$FWS" | awk '/ALLOW/ { print $1 }')"
+    fw_allows() {
+      printf '%s\n' "$RULES" | grep -qE "(^|,)$1(,|/|$)" && return 0
+      case "$1" in
+        22) printf '%s\n' "$RULES" | grep -qx 'OpenSSH' ;;
+        80|443) printf '%s\n' "$RULES" | grep -qiE '^(caddy|www|nginx|apache)' ;;
+        *) return 1 ;;
+      esac
+    }
+    for p in "$SSH_PORT" 80 443; do fw_allows "$p" || FW="$FW, $p not allowed"; done
+    [ "$FW" = "ufw active" ] && FW="ufw active (SSH, 80, 443 allowed)"
   elif [ -n "$FWS" ]; then FW="ufw inactive"; fi
 fi
 
