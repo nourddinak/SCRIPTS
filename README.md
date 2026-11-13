@@ -7,6 +7,60 @@ Server bootstrap scripts. One command each, no dependencies to install first.
 |---|---|
 | [`setup-github.sh`](setup-github.sh) | Prepares a VPS for GitHub Actions deployment: generates a deploy key, configures SSH, and prints the exact repository secrets to paste into GitHub. |
 | [`install-dev-tools.sh`](install-dev-tools.sh) | Installs and updates development tools: Node.js, npm, PM2, Python, Rust, Go, Docker, Git, and build tools. Auto-detects what's missing and installs latest versions. |
+| [`vps-deploy-setup.sh`](vps-deploy-setup.sh) | Gets a VPS ready for the vps-deploy skill (push-to-deploy for any app): authorizes your PC's key, sets up passwordless sudo, and prints a summary of the server to paste to Claude. |
+
+---
+
+## vps-deploy-setup.sh
+
+Run once on each VPS you want to deploy to with the `vps-deploy` Claude skill. After that, Claude deploys and
+checks the server through the key, and you don't need to log in again.
+
+### Quick start
+
+Ask Claude to "add a new vps". It makes a key on your PC and gives you this line with your public key filled in:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/vps-deploy-setup.sh) --name vps1 --key "ssh-ed25519 AAAA... vps-deploy vps1" --sudo
+```
+
+Run it on the VPS as the user deploys should use. Paste the block between `===== vps-deploy server info` and
+`===== end =====` back to Claude.
+
+Without flags it asks for the public key and whether to set up sudo:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/vps-deploy-setup.sh)
+```
+
+### What it does
+
+1. **SSH key**: adds the public key to `~/.ssh/authorized_keys` (never twice, correct permissions).
+2. **sudo**: with `--sudo` (or a yes to the question), writes `/etc/sudoers.d/90-vps-deploy` so the user can run
+   sudo without a password, after checking it with `visudo`. Deploys need this to install runtimes and manage services.
+3. **Looks around (read-only)** and prints: public IP, user, SSH port, CPU arch, OS, RAM/disk, Caddy and what its
+   main Caddyfile imports, running databases, installed runtimes, firewall state, every app in `/var/www`
+   (service, state, port, own Caddyfile, layout), Docker containers, and ports in use.
+
+Nothing else is changed. The only outbound request is to a public-IP service (api.ipify.org / ifconfig.me).
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `-n, --name NAME` | What to call this server (`vps1`, `vps2` …) |
+| `-k, --key PUBKEY` | Public key from your PC to authorize |
+| `--make-key` | No PC key? Make one on the server and print the private key once (save it yourself to `C:\Users\<you>\.ssh\<name>_deploy`) |
+| `--sudo` / `--no-sudo` | Set up passwordless sudo without asking / never touch sudo |
+| `-H, --host IP` | Override the detected public IP |
+| `-p, --port PORT` | Override the detected SSH port |
+| `-y, --yes` | Answer yes to every question |
+| `--save` | Also write the summary to `~/vps-deploy-info.txt` (mode `600`) |
+| `-h, --help` | Show help |
+
+### Requirements
+
+Debian or Ubuntu (vps-deploy uses apt), `bash`, `curl`. Passwordless sudo setup needs a user that's allowed to use sudo.
 
 ---
 
