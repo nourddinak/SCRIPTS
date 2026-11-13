@@ -8,7 +8,7 @@
 #
 #  It makes ONE key that only GitHub Actions uses to log in (your own login, e.g.
 #  your .ppk, is not touched), authorizes it, and shows it so you can paste it into
-#  GitHub. Re-running reuses the same key.
+#  GitHub, plus a one-line PowerShell command that saves it on your PC. Re-running reuses it.
 #
 #  Flags:
 #      -n, --name NAME     what to call this server (vps1 ...): also names the secrets (VPS1_HOST ...)
@@ -240,6 +240,7 @@ summary() {
   echo "===== vps-deploy server info: paste everything from here to the end line to Claude ====="
   echo "name: ${NAME:-<pick one, e.g. vps1>}"
   echo "secret_prefix: $PREFIX"
+  echo "pc_key_file: ~/.ssh/$PCNAME"
   echo "host: $HOST"
   echo "user: $USER_NAME"
   echo "ssh_port: $SSH_PORT"
@@ -262,20 +263,21 @@ summary() {
 }
 PREFIX="$(printf '%s' "${NAME:-vps}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9\n' '_')"
 
-head_ "4. GitHub secrets: paste these into GitHub (repo → Settings → Secrets and variables → Actions)"
-echo
-printf '  %-22s %s\n' "${PREFIX}_HOST" "$HOST"
-printf '  %-22s %s\n' "${PREFIX}_USER" "$USER_NAME"
-printf '  %-22s %s\n' "${PREFIX}_PORT" "$SSH_PORT"
-printf '  %-22s %s\n' "${PREFIX}_SSH_KEY" "the whole private key below, BEGIN and END lines included"
-echo
+PCNAME="$(printf '%s' "${NAME:-vps}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '_')_deploy"
+head_ "4. The GitHub key"
 if [ "$PRINT_PRIVATE" = 1 ]; then
-  warn "This private key logs in to this server. Paste it into GitHub only, never into a chat."
-  echo "----- copy from the next line -----"
-  cat "$KF"
-  echo "----- to the line above -----"
+  echo
+  printf '  %sSave it on your PC once%s: Claude then puts it into every repo itself (it never reads it).\n' "$B" "$N"
+  echo "  Copy the line below, paste it into PowerShell on your PC (your own window, not a chat):"
+  echo
+  printf '%s\n' "\$k=\"\$env:USERPROFILE\\.ssh\\$PCNAME\"; New-Item -ItemType Directory -Force \"\$env:USERPROFILE\\.ssh\" | Out-Null; [IO.File]::WriteAllBytes(\$k,[Convert]::FromBase64String('$(base64 -w0 < "$KF")')); icacls \$k /inheritance:r /grant:r \"\${env:USERNAME}:F\" | Out-Null; \"saved \$k\""
+  echo
+  warn "That line contains the private key (encoded). Only paste it into your own PowerShell."
+  echo
+  echo "  Or add it by hand per repo (Settings → Secrets and variables → Actions):"
+  printf '    %-20s %s\n' "${PREFIX}_HOST" "$HOST" "${PREFIX}_USER" "$USER_NAME" "${PREFIX}_PORT" "$SSH_PORT" "${PREFIX}_SSH_KEY" "the private key: cat $KF"
 else
-  note "private key not shown (--no-private). Show it with: cat $KF"
+  note "not shown (--no-private). Show it with: cat $KF"
 fi
 
 head_ "5. Server info: paste this block to Claude (it has no secrets)"

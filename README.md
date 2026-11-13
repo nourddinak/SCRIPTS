@@ -7,7 +7,7 @@ Server bootstrap scripts. One command each, no dependencies to install first.
 |---|---|
 | [`setup-github.sh`](setup-github.sh) | Prepares a VPS for GitHub Actions deployment: generates a deploy key, configures SSH, and prints the exact repository secrets to paste into GitHub. |
 | [`install-dev-tools.sh`](install-dev-tools.sh) | Installs and updates development tools: Node.js, npm, PM2, Python, Rust, Go, Docker, Git, and build tools. Auto-detects what's missing and installs latest versions. |
-| [`vps-deploy-setup.sh`](vps-deploy-setup.sh) | Gets a VPS ready for the vps-deploy skill (push-to-deploy for any app): makes a key only for GitHub Actions, sets up passwordless sudo, shows the GitHub secrets to paste, and prints a server summary for Claude. |
+| [`vps-deploy-setup.sh`](vps-deploy-setup.sh) | Gets a VPS ready for the vps-deploy skill (push-to-deploy for any app): makes a key only for GitHub Actions, sets up passwordless sudo, prints a one-line PowerShell command that saves that key on your PC, and a server summary for Claude. |
 
 ---
 
@@ -25,12 +25,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/nourddinak/SCRIPTS/main/vps-
 ```
 
 Then:
-1. **Section 4** shows the GitHub secrets: `VPS1_HOST`, `VPS1_USER`, `VPS1_PORT`, `VPS1_SSH_KEY` and the private
-   key. Paste the key into GitHub (repo → *Settings* → *Secrets and variables* → *Actions*). Never paste it into a chat.
+1. **Section 4** prints one PowerShell line. Paste it into PowerShell **on your PC** (your own window, not a chat).
+   It saves the key as `C:\Users\<you>\.ssh\vps1_deploy`, readable only by you, and Claude puts it into every
+   repo's `VPS1_SSH_KEY` secret itself. Prefer doing it by hand? The four secrets are listed under it.
 2. **Section 5** is the server info, between `===== vps-deploy server info` and `===== end =====`. It has no
    secrets. Paste it to Claude so it can add the server to its list.
 
-Running it again reuses the same key (`cat ~/.ssh/vps_deploy_key` shows it any time).
+Running it again reuses the same key and prints the save line again.
 
 ### What it does
 
